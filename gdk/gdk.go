@@ -20,9 +20,14 @@ static void _g_thread_init(GThreadFunctions *vtable) {
 	g_thread_init(vtable);
 #endif
 }
+static GdkEventButton* toGdkEventButton(void *e) {
+	return (GdkEventButton*)e;
+}
 */
 import "C"
 import "unsafe"
+//import "reflect"
+//import "fmt"
 
 func bool2gboolean(b bool) C.gboolean {
 	if b {
@@ -490,4 +495,54 @@ func (v *GdkPixmap) Unref() {
 func (v *GdkPixmap) GetDrawable() *GdkDrawable {
 	return &GdkDrawable {
 		(*C.GdkDrawable)(v.Pixmap) }
+}
+
+//-----------------------------------------------------------------------
+// GdkEvent
+//-----------------------------------------------------------------------
+type Event interface {}
+
+//-----------------------------------------------------------------------
+// GdkEventButton
+//-----------------------------------------------------------------------
+type GdkEventButton struct {
+	e *C.GdkEventButton
+}
+
+const (
+	Shift = 1 << iota
+	_
+	Ctrl
+	Alt
+	Mods = Alt - 1
+)
+
+const (
+	Button1 = 1 << iota
+	Button2
+	Button3
+)
+
+func EventButton(ptr unsafe.Pointer) *GdkEventButton {
+	return &GdkEventButton{C.toGdkEventButton(ptr)}
+}
+
+func (evt *GdkEventButton) Button() int {
+	return int(evt.e.button)
+}
+
+func (evt *GdkEventButton) State() int {
+	return int(evt.e.state)
+}
+
+func (evt *GdkEventButton) String() string {
+	return "GdkEventButton{" + string(uintptr(unsafe.Pointer(evt.e))) + "}"
+}
+
+func (evt *GdkEventButton) X() float64 {
+	return float64(evt.e.x)
+}
+
+func (evt *GdkEventButton) Y() float64 {
+	return float64(evt.e.y)
 }

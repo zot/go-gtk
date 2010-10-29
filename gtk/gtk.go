@@ -11,6 +11,12 @@ package gtk
 #include <stdarg.h>
 #include <string.h>
 
+static int is_event_stopping();
+
+//--------
+// Callbacks
+//--------
+
 typedef struct {
 	char name[256];
 	int func_no;
@@ -21,6 +27,10 @@ typedef struct {
 	GSignalQuery query;
 	int fire;
 } callback_info;
+
+static char* callback_name(callback_info* cb) {
+	return cb->name;
+}
 
 static callback_info* current_callback_info = NULL;
 static uintptr_t* callback_info_get_arg(callback_info* cbi, int idx) {
@@ -38,7 +48,7 @@ static int callback_info_get_current(callback_info* cbi) {
 	return 0;
 }
 
-static void _callback(void *data, ...) {
+static int _callback(void *data, ...) {
 	va_list ap;
 	callback_info *cbi = (callback_info*) data;
 	int i;
@@ -51,6 +61,8 @@ static void _callback(void *data, ...) {
 	}
 	va_end(ap);
 	current_callback_info = cbi;
+	return is_event_stopping(cbi);
+//	return 0;
 }
 
 static void _gtk_init(void* argc, void* argv) {
@@ -76,6 +88,58 @@ static long _gtk_signal_connect(void* obj, gchar* name, int func_no) {
 	index++;
 	return g_signal_connect_data((gpointer)obj, name, GTK_SIGNAL_FUNC(_callback), cbi, free_callback_info, G_CONNECT_SWAPPED);
 }
+
+extern void *realloc (void *__ptr, size_t __size);
+
+//-------------------
+// Event Stopping Patterns
+//-------------------
+
+// since event handling is deferred, the idea here
+// is to provide patterns for which event callbacks
+// should return true so that they stop event processing
+typedef struct {
+	char name[256];
+	void *target;
+	int buttons; // bit mask for which buttons stop event processing
+} event_stop_info;
+
+static event_stop_info* event_stops = NULL;
+static int event_stop_count = 8;
+
+static void addEventStoppingCallback(char *name, void *target, int buttons) {
+printf("Adding event stopping callback: %s, 0x%X, buttons: 0x%X\n", name, (int)target, buttons);
+	if (event_stops == NULL || event_stops[event_stop_count - 2].name[0]) {
+		event_stop_count *= 2;
+		event_stops = realloc(event_stops, event_stop_count * sizeof(event_stop_info));
+		event_stops[event_stop_count - 2].name[0] = event_stops[event_stop_count - 1].name[0] = 0;
+	}
+	int pos = 0;
+	for (; event_stops[pos].name[0]; pos++)
+		//find the next empty binding
+		;
+	strcpy(event_stops[pos].name, name);
+	event_stops[pos].target = target;
+	event_stops[pos].buttons = buttons;
+printf("done\n");
+}
+static int is_event_stopping(callback_info *cbi) {
+	if (cbi != NULL && cbi->target) {
+		int pos = 0;
+
+		for (; event_stops[pos].name[0]; pos++) {
+printf("callback: %s, string: %s\n", cbi->name, event_stops[pos].name);
+			if (event_stops[pos].target == cbi->target && strcmp(cbi->name, event_stops[pos].name) == 0) return
+  !((1 << ((GdkEventButton*)cbi->args[0])->button) & event_stops[pos].buttons);
+		}
+//return pos;
+	}
+	return 0;
+}
+
+//---------------
+// end event stopping
+//---------------
 
 static GtkWidget* _gtk_message_dialog_new(GtkWidget* parent, GtkDialogFlags flags, GtkMessageType type, GtkButtonsType buttons, gchar *message) {
 	return gtk_message_dialog_new(
@@ -579,6 +643,24 @@ static GSList* to_gslist(void* gs) {
 static int _check_version(int major, int minor, int micro) {
 	return GTK_CHECK_VERSION(major, minor, micro);
 }
+
+static int gtk_entry_char_offset(GtkEntry *entry, int x, int y) {
+	int index;
+	int trailing;
+	gint px;
+	gint py;
+	gtk_entry_get_layout_offsets(entry, &px, &py);
+	pango_layout_xy_to_index(gtk_entry_get_layout(entry), (x - px) * PANGO_SCALE, (y - py) * PANGO_SCALE, &index, &trailing);
+printf("index: %d, trailing: %d, x: %d, y: %d, px: %d, py: %d\n", index, trailing, x, y, px, py);
+	return gtk_entry_layout_index_to_text_index(entry, index);
+}
+
+static int get_int_property(void *entry, const char *prop) {
+	int value = 1;
+	g_object_get(entry, prop, &value, NULL);
+	return value;
+}
+
 */
 import "C"
 import "glib"
@@ -789,7 +871,7 @@ type WidgetLike interface {
 	ShowAll()
 	ShowNow()
 	Destroy()
-	Connect(s string, f CallbackFunc, data interface{})
+	Connect(s string, f CallbackFunc, data interface{}, buttons int)
 	GetTopLevel() *GtkWidget
 	GetTopLevelAsWindow() *GtkWindow
 	HideOnDelete()
@@ -801,6 +883,9 @@ type GtkWidget struct {
 func WidgetFromObject(object *glib.GObject) *GtkWidget {
 	return &GtkWidget {
 		C.to_GtkWidget(unsafe.Pointer(object.Object))}
+}
+func (v *GtkWidget) GetIntProperty(prop string) int {
+	return int(C.get_int_property(unsafe.Pointer(v.Widget), C.CString(prop)))
 }
 func (v *GtkWidget) ToGtkWidget() *C.GtkWidget {
 	return v.Widget
@@ -823,11 +908,14 @@ func (v *GtkWidget) ShowNow() {
 func (v *GtkWidget) Destroy() {
 	C.gtk_widget_destroy(v.Widget)
 }
-func (v *GtkWidget) Connect(s string, f CallbackFunc, data interface{}) {
+func (v *GtkWidget) Connect(s string, f CallbackFunc, data interface{}, buttons int) {
 	callback_contexts.Push(&CallbackContext{f, reflect.NewValue(data)})
 	ptr := C.CString(s)
 	defer C.free_string(ptr)
 	C._gtk_signal_connect(unsafe.Pointer(v.Widget), C.to_gcharptr(ptr), C.int(callback_contexts.Len())-1)
+	if buttons != 0 {
+		C.addEventStoppingCallback(ptr, unsafe.Pointer(v.Widget), C.int(buttons))
+	}
 }
 func (v *GtkWidget) GetTopLevel() *GtkWidget {
 	return &GtkWidget{
@@ -1411,8 +1499,8 @@ type GtkDialog struct {
 func (v *GtkDialog) Run() int {
 	return int(C.gtk_dialog_run(C.to_GtkDialog(v.Widget)))
 }
-func (v *GtkDialog) Response(response CallbackFunc, data interface{}) {
-	v.Connect("response", response, data)
+func (v *GtkDialog) Response(response CallbackFunc, data interface{}, buttons int) {
+	v.Connect("response", response, data, buttons)
 }
 func (v *GtkDialog) AddButton(button_text string, response_id int) *GtkButton {
 	ptr := C.CString(button_text)
@@ -1865,6 +1953,15 @@ func Entry() *GtkEntry {
 //	return &GtkEntry{GtkWidget{
 //		C.gtk_entry_new_with_buffer(C.to_GtkTextbuffer.TextBuffer)}}
 //}
+func (v *GtkEntry) GetIndex(x int,  y int) int {
+	return int(C.gtk_entry_char_offset(C.to_GtkEntry(v.Widget), C.int(x), C.int(y)))
+}
+func (v *GtkEntry) GetCursorPosition() int {
+	return v.GetIntProperty("cursor-position")
+}
+func (v *GtkEntry) GetSelectionBound() int {
+	return v.GetIntProperty("selection-bound")
+}
 func (v *GtkEntry) GetText() string {
 	return C.GoString(C.to_charptr(C.gtk_entry_get_text(C.to_GtkEntry(v.Widget))))
 }
@@ -2196,8 +2293,8 @@ type Clickable interface {
 	Clicked(CallbackFunc, interface{}) // this is a very simple interface...
 }
 
-func (v *GtkButton) Clicked(onclick CallbackFunc, data interface{}) {
-	v.Connect("clicked", onclick, data)
+func (v *GtkButton) Clicked(onclick CallbackFunc, data interface{}, buttons int) {
+	v.Connect("clicked", onclick, data, buttons)
 }
 
 type GtkButton struct {
@@ -3150,11 +3247,14 @@ func TextBuffer(tagtable *GtkTextTagTable) *GtkTextBuffer {
 	return &GtkTextBuffer{
 		C._gtk_text_buffer_new(tagtable.TextTagTable)}
 }
-func (v *GtkTextBuffer) Connect(s string, f CallbackFunc, data interface{}) {
+func (v *GtkTextBuffer) Connect(s string, f CallbackFunc, data interface{}, buttons int) {
 	callback_contexts.Push(&CallbackContext{f, reflect.NewValue(data)})
 	ptr := C.CString(s)
 	defer C.free_string(ptr)
 	C._gtk_signal_connect(unsafe.Pointer(v.TextBuffer), C.to_gcharptr(ptr), C.int(callback_contexts.Len())-1)
+	if buttons != 0 {
+		C.addEventStoppingCallback(ptr, v.TextBuffer, C.int(buttons))
+	}
 }
 func (v *GtkTextBuffer) GetLineCount() int {
 	return int(C._gtk_text_buffer_get_line_count(v.TextBuffer))
@@ -4741,6 +4841,7 @@ type CallbackContext struct {
 var callback_contexts *vector.Vector
 var main_loop bool = true
 
+
 func pollEvents() {
 	for main_loop {
 		if use_gtk_main == false {
@@ -4764,7 +4865,12 @@ func pollEvents() {
 					fargs[i] = context.data
 				} else {
 					if i-1 < int(cbi.args_no) {
-						fargs[i] = reflect.NewValue(C.callback_info_get_arg(&cbi, C.int(i)))
+						factory := forHandler(C.GoString(C.callback_name(&cbi)), t.In(i))
+						if factory != nil {
+							fargs[i] = factory.createValue(unsafe.Pointer(C.callback_info_get_arg(&cbi, C.int(i - 1))))
+						} else {
+							fargs[i] = reflect.NewValue(C.callback_info_get_arg(&cbi, C.int(i - 1)))
+						}
 					} else {
 						fargs[i] = reflect.NewValue(nil)
 					}
@@ -4777,7 +4883,27 @@ func pollEvents() {
 	}
 }
 
+type eventFactory struct {
+	eventType reflect.Type
+	creator func(unsafe.Pointer) gdk.Event
+}
+var eventFactories map[string]*eventFactory
+func addEventFactory(name string, obj interface{}, creator func(unsafe.Pointer) gdk.Event) {
+	eventFactories[name] = &eventFactory{reflect.Typeof(obj), creator}
+}
+func forHandler(name string, t reflect.Type) *eventFactory {
+	f := eventFactories[name]
+	if f.eventType.String() == t.String() {
+		return f
+	}
+	return nil
+}
+func (f *eventFactory) createValue(ptr unsafe.Pointer) reflect.Value {
+	return reflect.NewValue(gdk.EventButton(unsafe.Pointer(ptr)))
+}
 func Init(args *[]string) {
+	eventFactories = map[string]*eventFactory{}
+	addEventFactory("button-press-event", gdk.EventButton(nil), func(ptr unsafe.Pointer) gdk.Event {return gdk.EventButton(ptr)})
 	//runtime.GOMAXPROCS(10);
 	if args != nil {
 		var argc C.int = C.int(len(*args))
